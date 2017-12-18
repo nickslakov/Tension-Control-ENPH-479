@@ -7,50 +7,80 @@
 
 
 #include "HX711.h"                      // Library needed for the strain gauge amp
+#include <Servo.h>
 
-// Setup the scale
-const int dOut = 6;
-const int scaleClock = 7;
+// SERVO CONSTANTS
+const float conPI = 3.1415926535897932384626433832795;     // The hugely extra high accuracy of our apparatus demands this bizzare level of precision
+const float spacing = 1.2;                                 // Number of wire diameters per wrap. If this is 1 they will be tightly packed
+const float spoolD = 25.4*5.05/1000.0 ;                    // Spool Diameter in METRES
+const float wireD = 0.0015;                                // Wire Diameter in METRES
+const float rackLen = 0.08 ;                               // Length of Rack and Pinion Track in Metres
+const float oneLayerLen = conPI*spoolD*rackLen/(wireD*spacing);
+const int servoPin = 10;                                   //Where is the servo at? (Needs to be on 9 or 10, also can't use 9 or 10 for other pwm uses)
+
+// SERVO VARIABLES
+float cableOnSpool = 0;                                   // Length of cable on spool in this layer
+int layer = 1;
+float minangle = 20;
+float maxangle = 160;
+float linServCng = 0; 
+long numTicks = 0;    
+long lastTicks = 0;                                       // Number of Ticks on the encoder last time
+float rotations = 0;
+int dirSign = 1;                                          // Switches when we're moving the other way on the spool, 1 = toward motor when unspooling
+
+Servo servo;
+
+// SCALE CONSTANTS
+const int scaleClock = 8;
+const int dOut = 9;                                       // White cable with black marks
+const float calibration_factor = -440.8;                  // Measures force in grams
 
 HX711 scale(dOut, scaleClock);
-float calibration_factor = -440.8;      // To be tuned once spools are set up
 
-// setup motor pins
+// MOTOR CONSTANTS
 
-const int slpPin = 8;
-const int pwmPin = 9;
-const int dirPin = 10;
+const int dirPin = 4;
+const int pwmPin = 5;
+const int slpPin = 6;
+const int fltPin = 7;
+const int csPin = A7;
 
-int dirVal = HIGH;                      // Changed though loop
+// MOTOR VAIRABLES
+
+int dirVal;                         // Which way are we going? 
+double pwmVal;                      // How fast are we going? 
     
-// setup PID
+// PID CONSTANTS AND VARIABLES
 
-double pwmVal = 0;                      // The pwm value to be written to the motor
-double tensionSet = 200;                // Grams - the desired cable tension
-const int arraySize = 100;              // Number of errors to keep track of 
-double errors[arraySize];               // Array of errors, loops like a circular buffer
-int times[arraySize];                   // Record of time changes
-unsigned long lastTime = 0;             // The time since last loop
-int i = 0; 
-int j = arraySize - 1;
+const double tensionSet = 200.0;        // Grams - the desired cable tension
+double curError = 0;                    // Current error reading
+double lastError = 0;                   // Last error reading
+double errorInt = 0;                    // Integral of the error
+double errorDeriv = 0;                  // Derivative of the error
+unsigned long curTime;                  // Time at begining of current loop (constant through one loop, which is why we don't use millis())
+unsigned long lastTime;                 // Time at at start of last loop
 
-const double Kp = 0.2;                  // Maybe 1?
-const double Ki = 0.00001;              // 0.00005 or something
-const double Kd = 1;                    // 1-5 ish
+const double Kp = 0.08;                  // Maybe 0.06?
+const double Ki = 0.00008;               // 0.00015 or something
+const double Kd = 0.2;                   // 0.1 ish
 
-double pError = 0;
-double iError = 0;
-double dError = 0;
+double pError;
+double iError;
+double dError;
 
-// Encoder interupt routine
+// ENCODER CONSTANTS AND VARIABLES
 
-const int encoderPinA = 3;
-const int encoderPinB = 4;
+const int encoderPinA = 2;
+const int encoderPinB = 3;
 
-volatile unsigned long encoder0Pos = 0; // Holds the position of the spool shaft
+volatile long encoderPos = 0;          // Holds the position of the spool shaft
+
+
+
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(9600);                   // Probably won't need Serial running in final version?
 
   // SCALE
   scale.set_scale();
@@ -62,8 +92,10 @@ void setup() {
   pinMode(pwmPin, OUTPUT);
   pinMode(dirPin, OUTPUT);
 
-  digitalWrite(slpPin, HIGH);           // Turns on the h-bridge
-  digitalWrite(dirPin, dirVal);
+  digitalWrite(slpPin, HIGH);           // Turns on the h-bridge 
+
+  // ATTACH SERVO
+  servo.attach(servoPin);               
 
   // ENCODER
   pinMode(encoderPinA, INPUT);
@@ -71,104 +103,82 @@ void setup() {
   pinMode(encoderPinB, INPUT);
   digitalWrite(encoderPinB, HIGH);       // turn on pull-up resistor
 
-  attachInterrupt(1, doEncoder, CHANGE); // encoder pin on interrupt 0 - pin 2 and 1 is pin3
+  attachInterrupt(0, doEncoder, CHANGE); // initiallize the interupt routine (0 means pin2 and 1 means pin3 for some reason)
 
-  Serial.println("start");               // So we know things are working
+  Serial.println("start");               // Good to know things have begun
 
-  lastTime = millis();             
+  servo.write(minangle);                 // Best to start at the start? (maybe change this later?
+
+  lastTime = millis();                   // It is currently "lastTime"
 }
 
 void loop() {
+  
+  curError = tensionSet - scale.get_units()/2.0;  // Record the error, divide by 2 since the cable runs in and out 
+  curTime = millis();                             
 
-  if(i == arraySize){
-    i = 0;
-  }
-  if(j == arraySize){
-    j = 0;
-  }
+  errorInt += ((double)(curTime - lastTime))*(curError + lastError)/2.0;  // Running trapezoid rule integral
+  errorDeriv = (curError - lastError)/((double)(curTime - lastTime));     // Derivative of error (pretty rough though, could use double point or something?)
 
-  errors[i] = tensionSet - scale.get_units();  // Record the error
-  times[i] = millis() - lastTime;              // Record the time change
-  lastTime = millis();
-
-  if(errors[i]*errors[j] < 0){                 //Check when error changes sign
-    Serial.println("Swapped");
-    int a = i + 1;
-    for(int k=0; k < arraySize - 50; k++){     // Helps for faster changes, number of values set to zero can be tuned
-      if(a == arraySize){
-        a = 0;
-      }
-      errors[a] = 0;
-      times[a] = 0;
-      a++;
-    }
-  }
-
-  pError = Kp*errors[i];                      // Proportional error
-  iError = Ki*trapz(errors, times, i);        // Intergal error
-  dError = Kd*deriv(errors, times, i);        // Derivative Error
+  lastTime = curTime;
+  lastError = curError;
+  
+  pError = Kp*curError;                      // Proportional error
+  iError = Ki*errorInt;                      // Intergal error
+  dError = Kd*errorDeriv;                    // Derivative Error
   
   pwmVal = pError + iError + dError;
 
   if(pwmVal >= 0){
-    dirVal = HIGH;
+    dirVal = LOW;
   }
   if(pwmVal < 0){
-    dirVal = LOW;
+    dirVal = HIGH;
     pwmVal = -pwmVal;
   }
-  if(pwmVal > 80){                            // Truncated for testing (255 should be used in final version)
-    pwmVal = 80;
+
+  
+  if(pwmVal > 50){                            // Truncated for testing (255 should be used in final version)
+    pwmVal = 50;
   }
+  if(abs(encoderPos) > 600){                 // For testing. If the spool rotates more than once (~40cm), stop moving
+    pwmVal = 0;
+  }
+
+  Serial.println(curError);
   
   digitalWrite(dirPin, dirVal);               // Write the direction
   analogWrite(pwmPin,pwmVal);                 // Write the PWM
 
-  i++;
-  j++;
-}
 
-
-/*  Numericaly integrate the error using the trapezoid
- *  rule. 
- */
-double trapz(double errorList[], int times[], int index){
-  double integral = 0;
-  int m = index;
-  int n = index - 1;
-
-  if(n < 0){
-    n = arraySize - 1;
-  }
-
-  for(int j=0; j < arraySize ; j++){
-    if (n >= arraySize){
-      n = 0;
+  numTicks = encoderPos;                              // Get the number of ticks from the encoder since last time the loop ran
+  rotations = (numTicks-lastTicks)/600.0;             // Roations since last loop
+  lastTicks = numTicks;
+  cableOnSpool += rotations*spoolD*conPI;             // Total cable on the spool
+  
+  // Over and Underflow
+  if (cableOnSpool > oneLayerLen) { 
+    cableOnSpool -= oneLayerLen;
+    dirSign = -dirSign;
+    layer++;
     }
-    if (m >= arraySize){
-      m = 0;
+  if (cableOnSpool < 0){ 
+    cableOnSpool += oneLayerLen;
+    dirSign = -dirSign;
+    layer--;
     }
-    integral = integral + ((double)times[m])*(errorList[n]+errorList[m])/2.0;
-    n++;
-    m++;
-  }
-  return integral;
+
+   // Set servo position to the right place on the track
+  if (dirSign > 0){
+      servo.write(minangle + (maxangle-minangle)*cableOnSpool/oneLayerLen); 
+    }
+  else{
+      servo.write(maxangle - (maxangle-minangle)*cableOnSpool/oneLayerLen); 
+    }
+  
 }
 
-/*  This function takes the numerical derivative of the
- *  error. The approximation only uses two points, as 
- *  derivatives at the edge of a function are 
- *  notoriously difficult to make accurate. The error is
- *  of order dt, where dt is the time between error terms.
- */
-double deriv(double errorList[], int times[], int index){
-  int n = index - 1;
 
-  if (n < 0){
-    n = arraySize - 1;
-  }
-  return (errorList[index] - errorList[n])/((double)times[index]);
-}
 
 
 /*  Function to call when interrupt routine is triggered.
@@ -186,9 +196,9 @@ void doEncoder() {
      [Reference/PortManipulation], specifically the PIND register.
   */
   if (digitalRead(encoderPinA) == digitalRead(encoderPinB)) {
-    encoder0Pos++;
+    encoderPos++;
   } else {
-    encoder0Pos--;
+    encoderPos--;
   }
 }
 
