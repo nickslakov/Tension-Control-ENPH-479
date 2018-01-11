@@ -21,8 +21,8 @@ const int servoPin = 10;                                   //Where is the servo 
 // SERVO VARIABLES
 float cableOnSpool = 0;                                   // Length of cable on spool in this layer
 int layer = 1;
-float minangle = 0;
-float maxangle = 170;
+float minangle = 20;
+float maxangle = 160;
 float linServCng = 0; 
 long numTicks = 0;    
 long lastTicks = 0;                                       // Number of Ticks on the encoder last time
@@ -61,9 +61,9 @@ double errorDeriv = 0;                  // Derivative of the error
 unsigned long curTime;                  // Time at begining of current loop (constant through one loop, which is why we don't use millis())
 unsigned long lastTime;                 // Time at at start of last loop
 
-const double Kp = 0.05;                  // Maybe 0.06
-const double Ki = 0.0002;               // 0.00014 or something
-const double Kd = 0.8;                   // 0.35 ish
+const double Kp = 0.08;                  // Maybe 0.06?
+const double Ki = 0.00008;               // 0.00015 or something
+const double Kd = 0.2;                   // 0.1 ish
 
 double pError;
 double iError;
@@ -76,9 +76,7 @@ const int encoderPinB = 3;
 
 volatile long encoderPos = 0;          // Holds the position of the spool shaft
 
-// ON OFF SWITCH
 
-const int switchPin = 11;
 
 
 void setup() {
@@ -97,7 +95,7 @@ void setup() {
   digitalWrite(slpPin, HIGH);           // Turns on the h-bridge 
 
   // ATTACH SERVO
-  servo.attach(servoPin);
+  servo.attach(servoPin);               
 
   // ENCODER
   pinMode(encoderPinA, INPUT);
@@ -107,73 +105,50 @@ void setup() {
 
   attachInterrupt(0, doEncoder, CHANGE); // initiallize the interupt routine (0 means pin2 and 1 means pin3 for some reason)
 
-  // SWITCH
-  pinMode(switchPin, INPUT);
-  digitalWrite(switchPin, HIGH);        // pull up
-
-  
-
   Serial.println("start");               // Good to know things have begun
 
-  servo.write(minangle);                 // Best to start at the start?
+  servo.write(minangle);                 // Best to start at the start? (maybe change this later?
 
   lastTime = millis();                   // It is currently "lastTime"
-
 }
 
 void loop() {
+  
+  curError = tensionSet - scale.get_units()/2.0;  // Record the error, divide by 2 since the cable runs in and out 
+  curTime = millis();                             
 
+  errorInt += ((double)(curTime - lastTime))*(curError + lastError)/2.0;  // Running trapezoid rule integral
+  errorDeriv = (curError - lastError)/((double)(curTime - lastTime));     // Derivative of error (pretty rough though, could use double point or something?)
 
-  if(digitalRead(switchPin)) {
+  lastTime = curTime;
+  lastError = curError;
+  
+  pError = Kp*curError;                      // Proportional error
+  iError = Ki*errorInt;                      // Intergal error
+  dError = Kd*errorDeriv;                    // Derivative Error
+  
+  pwmVal = pError + iError + dError;
 
-    curTime = millis();
-    lastTime = curTime;
-    lastError = 0;
-
-    errorInt = 0;
-    
+  if(pwmVal >= 0){
+    dirVal = LOW;
+  }
+  if(pwmVal < 0){
     dirVal = HIGH;
+    pwmVal = -pwmVal;
+  }
+
+  
+  if(pwmVal > 50){                            // Truncated for testing (255 should be used in final version)
+    pwmVal = 50;
+  }
+  if(abs(encoderPos) > 600){                 // For testing. If the spool rotates more than once (~40cm), stop moving
     pwmVal = 0;
   }
-  else {
-    curError = tensionSet - scale.get_units()/2.0;  // Record the error, divide by 2 since the cable runs in and out 
-    curTime = millis();                             
-
-    errorInt += ((double)(curTime - lastTime))*(curError + lastError)/2.0;  // Running trapezoid rule integral
-    errorDeriv = (curError - lastError)/((double)(curTime - lastTime));     // Derivative of error (pretty rough though, could use double point or something?)
-
-    lastTime = curTime;
-    lastError = curError;
-  
-    pError = Kp*curError;                      // Proportional error
-    iError = Ki*errorInt;                      // Intergal error
-    dError = Kd*errorDeriv;                    // Derivative Error
-  
-    pwmVal = pError + iError + dError;
-
-    if(pwmVal >= 0){
-      dirVal = LOW;
-    }
-    if(pwmVal < 0){
-      dirVal = HIGH;
-      pwmVal = -pwmVal;
-    }
-
-  
-    if(pwmVal > 100){                            // Truncated for testing (255 should be used in final version)
-      pwmVal = 100;
-    }
-    if(abs(encoderPos) > 1500){                 // For testing. If the spool rotates more than once (~40cm), stop moving
-      pwmVal = 0;
-    }
-  }
-  
 
   Serial.println(curError);
   
   digitalWrite(dirPin, dirVal);               // Write the direction
   analogWrite(pwmPin,pwmVal);                 // Write the PWM
-
 
 
   numTicks = encoderPos;                              // Get the number of ticks from the encoder since last time the loop ran

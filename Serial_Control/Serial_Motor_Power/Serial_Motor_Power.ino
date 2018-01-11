@@ -1,11 +1,16 @@
 
-const int slpPin = 8;
-const int pwmPin = 9;
-const int dirPin = 10;
+
+
+const int dirPin = 4;
+const int pwmPin = 5;
+const int slpPin = 6;
+const int csPin = 7;
 
 char inputValue = 0;        
-int pwmValue = 0;        
-int counter = 0;
+int pwmValue = 0;     
+
+double val = 0;
+
 
 void setup() {
   // initialize serial communications at 9600 bps:
@@ -28,15 +33,7 @@ void loop() {
     Serial.println(inputValue);
 
     if((inputValue-'0') == 9){
-      if(counter % 2 == 0){
-        digitalWrite(dirPin, HIGH);
-        Serial.println("Direction Forwards");
-      }
-      else{
-        digitalWrite(dirPin, LOW);
-        Serial.println("Direction Reversed");
-      }
-      counter = counter + 1;
+      Serial.println(analogRead(csPin));
     }
     else{
       pwmValue = map((inputValue-'0'), 0, 8, 0, 255);
@@ -47,6 +44,17 @@ void loop() {
       analogWrite(pwmPin,pwmValue);
     }
   }
+
+  val = 0;
+  for(int i = 0; i < 1000; i++){
+    val += analogRead(csPin);
+  }
+  val = val/1000.0;
+
+  val = val*5000.0/1023.0;
+  val = (val - 29.0)/20.0;
+  
+  Serial.println(val);
 
   
   delay(2);
